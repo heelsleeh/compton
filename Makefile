@@ -13,7 +13,7 @@ PACKAGES = x11 x11-xcb xcb-renderutil xcb-render xcb-damage xcb-randr xcb-compos
 LIBS = -lm -lrt -lev
 INCS =
 
-OBJS = compton.o config.o win.o x.o
+OBJS = compton.o config.o win.o x.o backends/render_utils.o utils.o
 
 # === Configuration flags ===
 CFG = -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Wnonnull
@@ -136,15 +136,21 @@ src/.clang_complete: Makefile
 	@(for i in $(filter-out -O% -DNDEBUG, $(CFG) $(CPPFLAGS) $(INCS)); do echo "$$i"; done) > $@
 
 .deps:
-	mkdir -p $@
+	mkdir -p .deps
+	mkdir -p .deps/backends
+
+backends:
+	mkdir -p backends
 
 .deps/%.d: src/%.c | .deps
-	@set -e; rm -f $@; \
+	set -e; rm -f $@; \
 	  $(CC) -M $(CPPFLAGS) $(INCS) $< > $@.$$$$; \
 	  sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ > $@; \
 	  rm -f $@.$$$$
 %.o: src/%.c
 	$(CC) $(CFG) $(CPPFLAGS) $(INCS) -c src/$*.c -o $@
+backends/%.o: src/backends/%.c | backends
+	$(CC) $(CFG) $(CPPFLAGS) $(INCS) -c src/backends/$*.c -o $@
 
 compton: $(OBJS)
 	$(CC) $(CFG) $(CPPFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)

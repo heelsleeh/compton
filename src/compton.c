@@ -26,6 +26,8 @@
 #ifdef CONFIG_OPENGL
 #include "opengl.h"
 #endif
+#include "backend/backend.h"
+#include "backend/backend_common.h"
 #include "win.h"
 #include "x.h"
 #include "config.h"
@@ -132,14 +134,6 @@ const char * const BACKEND_STRS[NUM_BKEND + 1] = {
   NULL
 };
 
-/// Names of root window properties that could point to a pixmap of
-/// background.
-const char *background_props_str[] = {
-  "_XROOTPMAP_ID",
-  "_XSETROOT_ID",
-  0,
-};
-
 // === Global variables ===
 
 /// Pointer to current session, as a global variable. Only used by
@@ -164,26 +158,6 @@ free_xinerama_info(session_t *ps) {
   ps->xinerama_scrs = NULL;
   ps->xinerama_nscrs = 0;
 #endif
-}
-
-/**
- * Destroy all resources in a <code>struct _win</code>.
- */
-static inline void
-free_win_res(session_t *ps, win *w) {
-  free_win_res_glx(ps, w);
-  free_paint(ps, &w->paint);
-  free_fence(ps, &w->fence);
-  pixman_region32_fini(&w->bounding_shape);
-  free_paint(ps, &w->shadow_paint);
-  // BadDamage may be thrown if the window is destroyed
-  set_ignore_cookie(ps,
-      xcb_damage_destroy(ps->c, w->damage));
-  rc_region_unref(&w->reg_ignore);
-  free(w->name);
-  free(w->class_instance);
-  free(w->class_general);
-  free(w->role);
 }
 
 /**
@@ -568,7 +542,7 @@ paint_preprocess(session_t *ps, win *list) {
     const bool was_painted = w->to_paint;
     const opacity_t opacity_old = w->opacity;
     // Restore flags from last paint if the window is being faded out
-    if (w->a.map_state == XCB_MAP_STATE_UNMAPPED) {
+    if (w->state == WSTATE_UNMAPPING) {
       win_set_shadow(ps, w, w->shadow_last);
       w->fade = w->fade_last;
       win_set_invert_color(ps, w, w->invert_color_last);
@@ -632,7 +606,7 @@ paint_preprocess(session_t *ps, win *list) {
     if (!w->ever_damaged
         || w->g.x + w->g.width < 1 || w->g.y + w->g.height < 1
         || w->g.x >= ps->root_width || w->g.y >= ps->root_height
-        || ((w->a.map_state == XCB_MAP_STATE_UNMAPPED || w->destroyed) && !w->paint.pixmap)
+        || ((w->state == WSTATE_UNMAPPED || w->destroying))
         || (double) w->opacity / OPAQUE * MAX_ALPHA < 1
         || w->paint_excluded)
       to_paint = false;
@@ -702,7 +676,7 @@ paint_preprocess(session_t *ps, win *list) {
     reg_ignore_valid = reg_ignore_valid && w->reg_ignore_valid;
     w->reg_ignore_valid = true;
 
-    assert(w->destroyed == (w->fade_callback == finish_destroy_win));
+    assert(w->destroying == (w->fade_callback == finish_destroy_win));
     win_check_fade_finished(ps, &w);
 
     // Avoid setting w->to_paint if w is freed
@@ -825,9 +799,8 @@ static void
 finish_map_win(session_t *ps, win **_w) {
   win *w = *_w;
   w->in_openclose = false;
-  if (ps->o.no_fading_openclose) {
+  if (ps->o.no_fading_openclose)
     win_determine_fade(ps, w);
-  }
 }
 
 void
@@ -837,22 +810,24 @@ map_win(session_t *ps, Window id) {
   if (ps->overlay && id == ps->overlay && !ps->redirected) {
     xcb_unmap_window(ps->c, ps->overlay);
     XFlush(ps->dpy);
+    return;
   }
 
   win *w = find_win(ps, id);
 
 #ifdef DEBUG_EVENTS
-  printf_dbgf("(%#010lx \"%s\"): %p\n", id, (w ? w->name: NULL), w);
+  printf_dbgf("(%#r10lx \"%s\"): %p\n", id, (w ? w->name: NULL), w);
 #endif
 
   // Don't care about window mapping if it's an InputOnly window
-  // Try avoiding mapping a window twice
-  if (!w || InputOnly == w->a._class
+  // Also, try avoiding mapping a window twice
+  if (!w || w->a._class == XCB_WINDOW_CLASS_INPUT_ONLY
       || w->a.map_state == XCB_MAP_STATE_VIEWABLE)
     return;
 
   assert(!win_is_focused_real(ps, w));
 
+  // XXX Can't we assume map_state can't be unviewable?
   w->a.map_state = XCB_MAP_STATE_VIEWABLE;
 
   cxinerama_win_upd_scr(ps, w);
@@ -863,25 +838,22 @@ map_win(session_t *ps, Window id) {
       (const uint32_t[]) { determine_evmask(ps, id, WIN_EVMODE_FRAME) });
 
   // Notify compton when the shape of a window changes
-  if (ps->shape_exists) {
+  if (ps->shape_exists)
     xcb_shape_select_input(ps->c, id, 1);
-  }
 
   // Make sure the XSelectInput() requests are sent
-  XFlush(ps->dpy);
+  xcb_flush(ps->c);
 
   // Update window mode here to check for ARGB windows
   win_determine_mode(ps, w);
 
   // Detect client window here instead of in add_win() as the client
   // window should have been prepared at this point
-  if (!w->client_win) {
+  if (!w->client_win)
     win_recheck_client(ps, w);
-  }
-  else {
+  else
     // Re-mark client window here
     win_mark_client(ps, w, w->client_win);
-  }
 
   assert(w->client_win);
 
@@ -929,6 +901,14 @@ map_win(session_t *ps, Window id) {
   // update. (Issue #35)
   win_update_bounding_shape(ps, w);
 
+  // If the screen is not redirected, the pixmaps of window are not valid,
+  // so we can't call prepare_win
+  if (ps->redirected)
+    w->win_data = backend_list[ps->o.backend]->prepare_win(ps->backend_data, ps, w);
+
+  // Make sure that win_data is available iff `state` is MAPPED
+  w->state = WSTATE_MAPPED;
+
 #ifdef CONFIG_DBUS
   // Send D-Bus signal
   if (ps->o.dbus) {
@@ -940,15 +920,22 @@ map_win(session_t *ps, Window id) {
 static void
 finish_unmap_win(session_t *ps, win **_w) {
   win *w = *_w;
+  printf_errf("(): %lx %p", w->id, w->win_data);
   w->ever_damaged = false;
   w->in_openclose = false;
   w->reg_ignore_valid = false;
+  w->state = WSTATE_UNMAPPED;
 
   /* damage region */
   add_damage_from_win(ps, w);
 
-  free_paint(ps, &w->paint);
-  free_paint(ps, &w->shadow_paint);
+  // We are in unmap_win, we definitely was viewable
+  if (ps->redirected) {
+    if (!w->win_data)
+      printf_errf("(): %s", w->name);
+    backend_list[ps->o.backend]->release_win(ps->backend_data, ps, w, w->win_data);
+  }
+  w->win_data = NULL;
 }
 
 static void
@@ -956,27 +943,21 @@ unmap_win(session_t *ps, win **_w) {
   win *w = *_w;
   if (!w || w->a.map_state == XCB_MAP_STATE_UNMAPPED) return;
 
-  if (w->destroyed) return;
-
-  // One last synchronization
-  if (w->paint.pixmap)
-    xr_sync(ps, w->paint.pixmap, &w->fence);
-  free_fence(ps, &w->fence);
+  if (w->destroying) return;
 
   // Set focus out
   win_set_focused(ps, w, false);
 
+  assert(w->win_data);
+  printf_errf("(): %lx %p", w->id, w->win_data);
   w->a.map_state = XCB_MAP_STATE_UNMAPPED;
+  w->state = WSTATE_UNMAPPING;
 
   // Fading out
   w->flags |= WFLAG_OPCT_CHANGE;
   win_set_fade_callback(ps, _w, finish_unmap_win, false);
   w->in_openclose = true;
   win_determine_fade(ps, w);
-
-  // Validate pixmap if we have to do fading
-  if (w->fade)
-    win_validate_pixmap(ps, w);
 
   // don't care about properties anymore
   win_ev_stop(ps, w);
@@ -1020,7 +1001,7 @@ restack_win(session_t *ps, win *w, Window new_above) {
 
     // rehook
     for (prev = &ps->list; *prev; prev = &(*prev)->next) {
-      if ((*prev)->id == new_above && !(*prev)->destroyed) {
+      if ((*prev)->id == new_above && !(*prev)->destroying) {
         found = true;
         break;
       }
@@ -1056,7 +1037,7 @@ restack_win(session_t *ps, win *w, Window new_above) {
         to_free = ev_window_name(ps, c->id, &window_name);
 
         desc = "";
-        if (c->destroyed) desc = "(D) ";
+        if (c->destroying) desc = "(D) ";
         printf("%#010lx \"%s\" %s", c->id, window_name, desc);
         if (c->next)
           printf("-> ");
@@ -1076,7 +1057,8 @@ static void
 configure_win(session_t *ps, xcb_configure_notify_event_t *ce) {
   // On root window changes
   if (ce->window == ps->root) {
-    free_paint(ps, &ps->tgt_buffer);
+    //free_paint(ps, &ps->tgt_buffer);
+    // XXX deinit/reinit backend??
 
     ps->root_width = ce->width;
     ps->root_height = ce->height;
@@ -1190,10 +1172,11 @@ circulate_win(session_t *ps, xcb_circulate_notify_event_t *ce) {
   restack_win(ps, w, new_above);
 }
 
+// TODO move to win.c
 static void
 finish_destroy_win(session_t *ps, win **_w) {
   win *w = *_w;
-  assert(w->destroyed);
+  assert(w->destroying);
   win **prev = NULL, *i = NULL;
 
 #ifdef DEBUG_EVENTS
@@ -1206,26 +1189,17 @@ finish_destroy_win(session_t *ps, win **_w) {
       printf_dbgf("(%#010lx \"%s\"): %p\n", w->id, w->name, w);
 #endif
 
-      finish_unmap_win(ps, _w);
+      // Only call finish_unmap_win when we are indeed in the process
+      // of unmapping this window. If we are not, win_data might not be
+      // valid.
+      if (w->state == WSTATE_UNMAPPING)
+        finish_unmap_win(ps, _w);
       *prev = w->next;
-
-      // Clear active_win if it's pointing to the destroyed window
-      if (w == ps->active_win)
-        ps->active_win = NULL;
-
-      free_win_res(ps, w);
-
-      // Drop w from all prev_trans to avoid accessing freed memory in
-      // repair_win()
-      for (win *w2 = ps->list; w2; w2 = w2->next)
-        if (w == w2->prev_trans)
-          w2->prev_trans = NULL;
-
-      free(w);
-      *_w = NULL;
+      free_win(ps, w);
       break;
     }
   }
+  *_w = NULL;
 }
 
 static void
@@ -1237,9 +1211,10 @@ destroy_win(session_t *ps, Window id) {
 #endif
 
   if (w) {
+    printf_errf("(): %lx %d", w->id, w->state);
     unmap_win(ps, &w);
 
-    w->destroyed = true;
+    w->destroying = true;
 
     if (ps->o.no_fading_destroyed_argb)
       win_determine_fade(ps, w);
@@ -1258,10 +1233,7 @@ destroy_win(session_t *ps, Window id) {
 
 static inline void
 root_damaged(session_t *ps) {
-  if (ps->root_tile_paint.pixmap) {
-    xcb_clear_area(ps->c, true, ps->root, 0, 0, 0, 0);
-    free_root_tile(ps);
-  }
+  // XXX deinit, reinit backend?
 
   // Mark screen damaged
   force_repaint(ps);
@@ -1688,14 +1660,10 @@ ev_property_notify(session_t *ps, xcb_property_notify_event_t *ev) {
     if (ps->o.track_focus && ps->o.use_ewmh_active_win
         && ps->atom_ewmh_active_win == ev->atom) {
       update_ewmh_active_win(ps);
-    }
-    else {
+    } else {
       // Destroy the root "image" if the wallpaper probably changed
-      for (int p = 0; background_props_str[p]; p++) {
-        if (ev->atom == get_atom(ps, background_props_str[p])) {
+      if (x_atom_is_background_prop(ps, ev->atom)) {
           root_damaged(ps);
-          break;
-        }
       }
     }
 
@@ -2914,6 +2882,8 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
   if (ps->o.monitor_repaint && ps->o.backend != BKEND_XRENDER)
     printf_errf("(): --monitor-repaint has no effect when backend is not xrender");
 
+  assert(backend_list[ps->o.backend] != NULL);
+
   // Range checking and option assignments
   ps->o.fade_delta = max_i(ps->o.fade_delta, 1);
   ps->o.shadow_radius = max_i(ps->o.shadow_radius, 0);
@@ -2961,20 +2931,7 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
 
   // Fill default blur kernel
   if (ps->o.blur_background && !ps->o.blur_kerns[0]) {
-    // Convolution filter parameter (box blur)
-    // gaussian or binomial filters are definitely superior, yet looks
-    // like they aren't supported as of xorg-server-1.13.0
-    static const xcb_render_fixed_t convolution_blur[] = {
-      // Must convert to XFixed with DOUBLE_TO_XFIXED()
-      // Matrix size
-      DOUBLE_TO_XFIXED(3), DOUBLE_TO_XFIXED(3),
-      // Matrix
-      DOUBLE_TO_XFIXED(1), DOUBLE_TO_XFIXED(1), DOUBLE_TO_XFIXED(1),
-      DOUBLE_TO_XFIXED(1), DOUBLE_TO_XFIXED(1), DOUBLE_TO_XFIXED(1),
-      DOUBLE_TO_XFIXED(1), DOUBLE_TO_XFIXED(1), DOUBLE_TO_XFIXED(1),
-    };
-    ps->o.blur_kerns[0] = ccalloc(ARR_SIZE(convolution_blur), xcb_render_fixed_t);
-    memcpy(ps->o.blur_kerns[0], convolution_blur, sizeof(convolution_blur));
+    parse_conv_kern_lst(ps, "3x3box", ps->o.blur_kerns, MAX_BLUR_PASS);
   }
 
   rebuild_shadow_exclude_reg(ps);
@@ -3176,6 +3133,14 @@ redir_start(session_t *ps) {
 
     xcb_composite_redirect_subwindows(ps->c, ps->root, XCB_COMPOSITE_REDIRECT_MANUAL);
 
+    x_sync(ps->c);
+
+    backend_info_t *bi = backend_list[ps->o.backend];
+    ps->backend_data = bi->init(ps);
+    for (win *w = ps->list; w; w = w->next)
+      if (w->a.map_state == XCB_MAP_STATE_VIEWABLE)
+        w->win_data = bi->prepare_win(ps->backend_data, ps, w);
+
     /*
     // Unredirect GL context window as this may have an effect on VSync:
     // < http://dri.freedesktop.org/wiki/CompositeSwap >
@@ -3205,18 +3170,24 @@ redir_stop(session_t *ps) {
     print_timestamp(ps);
     printf_dbgf("(): Screen unredirected.\n");
 #endif
+    backend_info_t *bi = backend_list[ps->o.backend];
     // Destroy all Pictures as they expire once windows are unredirected
     // If we don't destroy them here, looks like the resources are just
     // kept inaccessible somehow
     for (win *w = ps->list; w; w = w->next) {
-      free_paint(ps, &w->paint);
-      free_fence(ps, &w->fence);
+      if (w->a.map_state == XCB_MAP_STATE_VIEWABLE)
+        bi->release_win(ps->backend_data, ps, w, w->win_data);
+      w->win_data = NULL;
     }
 
     xcb_composite_unredirect_subwindows(ps->c, ps->root, XCB_COMPOSITE_REDIRECT_MANUAL);
     // Unmap overlay window
     if (ps->overlay)
       xcb_unmap_window(ps->c, ps->overlay);
+
+    // deinit backend
+    bi->deinit(ps, ps->backend_data);
+    ps->backend_data = NULL;
 
     // Must call XSync() here
     x_sync(ps->c);
@@ -3411,10 +3382,6 @@ session_init(session_t *ps_old, int argc, char **argv) {
     .root_width = 0,
     // .root_damage = None,
     .overlay = None,
-    .root_tile_fill = false,
-    .root_tile_paint = PAINT_INIT,
-    .tgt_picture = None,
-    .tgt_buffer = PAINT_INIT,
     .reg_win = None,
     .o = {
       .config_file = NULL,
@@ -3486,13 +3453,12 @@ session_init(session_t *ps_old, int argc, char **argv) {
       .detect_client_leader = false,
 
       .track_focus = false,
-      .track_wdata = false,
+      .track_wdata = true,
       .track_leader = false,
     },
 
     .time_start = { 0, 0 },
     .redirected = false,
-    .alpha_picts = NULL,
     .fade_running = false,
     .fade_time = 0L,
     .ignore_head = NULL,
@@ -3507,9 +3473,6 @@ session_init(session_t *ps_old, int argc, char **argv) {
     .active_win = NULL,
     .active_leader = None,
 
-    .black_picture = None,
-    .cshadow_picture = None,
-    .white_picture = None,
     .gaussian_map = NULL,
     .cgsize = 0,
     .shadow_corner = NULL,
@@ -3788,20 +3751,6 @@ session_init(session_t *ps_old, int argc, char **argv) {
 
   init_atoms(ps);
 
-  {
-    xcb_render_create_picture_value_list_t pa = {
-      .subwindowmode = IncludeInferiors,
-    };
-
-    ps->root_picture = x_create_picture_with_visual_and_pixmap(ps,
-      ps->vis, ps->root, XCB_RENDER_CP_SUBWINDOW_MODE, &pa);
-    if (ps->overlay != XCB_NONE) {
-      ps->tgt_picture = x_create_picture_with_visual_and_pixmap(ps,
-        ps->vis, ps->overlay, XCB_RENDER_CP_SUBWINDOW_MODE, &pa);
-    } else
-      ps->tgt_picture = ps->root_picture;
-  }
-
   ev_io_init(&ps->xiow, x_event_callback, ConnectionNumber(ps->dpy), EV_READ);
   ev_io_start(ps->loop, &ps->xiow);
   ev_init(&ps->unredir_timer, tmout_unredir_callback);
@@ -3930,18 +3879,17 @@ session_destroy(session_t *ps) {
   // Free window linked list
   {
     win *next = NULL;
-    for (win *w = ps->list; w; w = next) {
-      // Must be put here to avoid segfault
+    win *list = ps->list;
+    ps->list = NULL;
+
+    for (win *w = list; w; w = next) {
       next = w->next;
 
-      if (w->a.map_state == XCB_MAP_STATE_VIEWABLE && !w->destroyed)
+      if (w->a.map_state == XCB_MAP_STATE_VIEWABLE && !w->destroying)
         win_ev_stop(ps, w);
 
-      free_win_res(ps, w);
-      free(w);
+      free_win(ps, w);
     }
-
-    ps->list = NULL;
   }
 
   // Free blacklists
@@ -3978,20 +3926,6 @@ session_destroy(session_t *ps) {
     ps->ignore_head = NULL;
     ps->ignore_tail = &ps->ignore_head;
   }
-
-  // Free tgt_{buffer,picture} and root_picture
-  if (ps->tgt_buffer.pict == ps->tgt_picture)
-    ps->tgt_buffer.pict = None;
-
-  if (ps->tgt_picture == ps->root_picture)
-    ps->tgt_picture = None;
-  else
-    free_picture(ps->c, &ps->tgt_picture);
-  free_fence(ps, &ps->tgt_buffer_fence);
-
-  free_picture(ps->c, &ps->root_picture);
-  free_paint(ps, &ps->tgt_buffer);
-
   pixman_region32_fini(&ps->screen_reg);
   pixman_region32_fini(&ps->all_damage);
   for (int i = 0; i < CGLX_MAX_BUFFER_AGE; ++i)
@@ -4009,10 +3943,9 @@ session_destroy(session_t *ps) {
   }
   free(ps->o.glx_fshader_win_str);
   free_xinerama_info(ps);
+
+  // XXX Destroy backend here
   free(ps->pictfmts);
-
-  deinit_render(ps);
-
 #ifdef CONFIG_VSYNC_DRM
   // Close file opened for DRM VSync
   if (ps->drm_fd >= 0) {
@@ -4032,6 +3965,9 @@ session_destroy(session_t *ps) {
     xcb_destroy_window(ps->c, ps->reg_win);
     ps->reg_win = None;
   }
+
+  backend_list[ps->o.backend]->deinit(ps->backend_data, ps);
+  ps->backend_data = NULL;
 
   // Flush all events
   x_sync(ps->c);

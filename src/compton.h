@@ -30,6 +30,7 @@
 #include "opengl.h" // XXX clean up
 #endif
 #include "common.h"
+#include "backend/backend.h"
 #include "win.h"
 #include "x.h"
 #include "c2.h"
@@ -105,7 +106,7 @@ free_wincondlst(c2_lptr_t **pcondlst) {
 
 #ifndef CONFIG_OPENGL
 static inline void
-free_paint_glx(session_t *ps, paint_t *p) {}
+free_paint_glx(session_t *ps, void *p) {}
 static inline void
 free_win_res_glx(session_t *ps, win *w) {}
 #endif
@@ -160,16 +161,6 @@ dump_drawable(session_t *ps, Drawable drawable) {
   else {
     printf_dbgf("(%#010lx): Failed\n", drawable);
   }
-}
-
-/**
- * Validate pixmap of a window, and destroy pixmap and picture if invalid.
- */
-static inline void
-win_validate_pixmap(session_t *ps, win *w) {
-  // Destroy pixmap and picture, if invalid
-  if (!x_validate_pixmap(ps, w->paint.pixmap))
-    free_paint(ps, &w->paint);
 }
 
 // vim: set et sw=2 :
