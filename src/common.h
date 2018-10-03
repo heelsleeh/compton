@@ -374,11 +374,7 @@ typedef struct glx_prog_main {
 }
 
 #endif
-#else
-struct glx_prog_main { };
 #endif
-
-#define PAINT_INIT { .pixmap = None, .pict = None }
 
 /// Linked list type of atoms.
 typedef struct _latom {
@@ -440,7 +436,9 @@ typedef struct options_t {
   /// Custom fragment shader for painting windows, as a string.
   char *glx_fshader_win_str;
   /// Custom GLX program used for painting window.
+#ifdef CONFIG_OPENGL
   glx_prog_main_t glx_prog_win;
+#endif
   /// Whether to fork to background.
   bool fork_after_register;
   /// Whether to detect rounded corners.
@@ -669,6 +667,8 @@ typedef struct session {
   ev_prepare event_check;
   /// Signal handler for SIGUSR1
   ev_signal usr1_signal;
+  /// backend data
+  void *backend_data;
   /// libev mainloop
   struct ev_loop *loop;
   // === Display related ===
@@ -694,20 +694,8 @@ typedef struct session {
   // Damage root_damage;
   /// X Composite overlay window. Used if <code>--paint-on-overlay</code>.
   Window overlay;
-  /// Whether the root tile is filled by compton.
-  bool root_tile_fill;
-  /// Picture of the root window background.
-  paint_t root_tile_paint;
   /// A region of the size of the screen.
   region_t screen_reg;
-  /// Picture of root window. Destination of painting in no-DBE painting
-  /// mode.
-  xcb_render_picture_t root_picture;
-  /// A Picture acting as the painting target.
-  xcb_render_picture_t tgt_picture;
-  /// Temporary buffer to paint to before sending to display.
-  paint_t tgt_buffer;
-  XSyncFence tgt_buffer_fence;
   /// Window ID of the window we register as a symbol.
   Window reg_win;
 #ifdef CONFIG_OPENGL
@@ -733,8 +721,6 @@ typedef struct session {
   region_t all_damage_last[CGLX_MAX_BUFFER_AGE];
   /// Whether all windows are currently redirected.
   bool redirected;
-  /// Pre-generated alpha pictures.
-  xcb_render_picture_t *alpha_picts;
   /// Time of last fading. In milliseconds.
   time_ms_t fade_time;
   /// Head pointer of the error ignore linked list.
@@ -772,12 +758,6 @@ typedef struct session {
   Window active_leader;
 
   // === Shadow/dimming related ===
-  /// 1x1 black Picture.
-  xcb_render_picture_t black_picture;
-  /// 1x1 Picture of the shadow color.
-  xcb_render_picture_t cshadow_picture;
-  /// 1x1 white Picture.
-  xcb_render_picture_t white_picture;
   /// Gaussian map of shadow.
   conv *gaussian_map;
   // for shadow precomputation
@@ -1269,7 +1249,7 @@ find_win(session_t *ps, Window id) {
   win *w;
 
   for (w = ps->list; w; w = w->next) {
-    if (w->id == id && !w->destroyed)
+    if (w->id == id && !w->destroying)
       return w;
   }
 
@@ -1288,20 +1268,11 @@ find_toplevel(session_t *ps, Window id) {
     return NULL;
 
   for (win *w = ps->list; w; w = w->next) {
-    if (w->client_win == id && !w->destroyed)
+    if (w->client_win == id && !w->destroying)
       return w;
   }
 
   return NULL;
-}
-
-/**
- * Check if current backend uses GLX.
- */
-static inline bool
-bkend_use_glx(session_t *ps) {
-  return BKEND_GLX == ps->o.backend
-    || BKEND_XR_GLX_HYBRID == ps->o.backend;
 }
 
 /**

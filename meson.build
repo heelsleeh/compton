@@ -14,6 +14,8 @@ if git.found()
 	endif
 endif
 
+
+add_global_arguments('-DDEBUG_REDIR', language: 'c')
 add_global_arguments('-std=c11', language: 'c')
 add_global_arguments('-DCOMPTON_VERSION="'+version+'"', language: 'c')
 
