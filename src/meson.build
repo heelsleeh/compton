@@ -49,12 +49,6 @@ if get_option('vsync_drm')
 	deps += [dependency('libdrm', required: true)]
 endif
 
-if get_option('opengl')
-	cflags += ['-DCONFIG_OPENGL']
-	deps += [dependency('gl', required: true)]
-	srcs += [ 'opengl.c' ]
-endif
-
 if get_option('dbus')
 	cflags += ['-DCONFIG_DBUS']
 	deps += [dependency('dbus-1', required: true)]

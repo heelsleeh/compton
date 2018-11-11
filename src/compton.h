@@ -26,9 +26,6 @@
 
 #include <X11/Xutil.h>
 #include <pixman.h>
-#ifdef CONFIG_OPENGL
-#include "opengl.h" // XXX clean up
-#endif
 #include "common.h"
 #include "backend/backend.h"
 #include "win.h"
@@ -103,14 +100,6 @@ free_wincondlst(c2_lptr_t **pcondlst) {
   while ((*pcondlst = c2_free_lptr(*pcondlst)))
     continue;
 }
-
-#ifndef CONFIG_OPENGL
-static inline void
-free_paint_glx(session_t *ps, void *p) {}
-static inline void
-free_win_res_glx(session_t *ps, win *w) {}
-#endif
-
 /**
  * Create a XTextProperty of a single string.
  */

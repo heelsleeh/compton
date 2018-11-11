@@ -23,9 +23,6 @@
 
 #include "compiler.h"
 #include "compton.h"
-#ifdef CONFIG_OPENGL
-#include "opengl.h"
-#endif
 #include "backend/backend.h"
 #include "backend/backend_common.h"
 #include "win.h"
