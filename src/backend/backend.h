@@ -125,6 +125,7 @@ typedef struct backend_info {
 } backend_info_t;
 
 extern backend_info_t xrender_backend;
+extern backend_info_t glx_backend;
 extern backend_info_t *backend_list[NUM_BKEND];
 
 bool default_is_win_transparent(void *, win *, void *);

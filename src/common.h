@@ -272,10 +272,6 @@ typedef Bool (*f_WaitForMscOML) (Display* dpy, GLXDrawable drawable, int64_t tar
 typedef int (*f_SwapIntervalSGI) (int interval);
 typedef int (*f_SwapIntervalMESA) (unsigned int interval);
 
-typedef void (*f_BindTexImageEXT) (Display *display, GLXDrawable drawable, int buffer, const int *attrib_list);
-typedef void (*f_ReleaseTexImageEXT) (Display *display, GLXDrawable drawable, int buffer);
-
-#ifdef CONFIG_OPENGL
 // Looks like duplicate typedef of the same type is safe?
 typedef int64_t GLint64;
 typedef uint64_t GLuint64;
@@ -319,61 +315,6 @@ typedef GLsync (*f_ImportSyncEXT) (GLenum external_sync_type,
 #ifdef DEBUG_GLX_MARK
 typedef void (*f_StringMarkerGREMEDY) (GLsizei len, const void *string);
 typedef void (*f_FrameTerminatorGREMEDY) (void);
-#endif
-
-/// @brief Wrapper of a GLX FBConfig.
-typedef struct {
-  GLXFBConfig cfg;
-  GLint texture_fmt;
-  GLint texture_tgts;
-  bool y_inverted;
-} glx_fbconfig_t;
-
-/// @brief Wrapper of a binded GLX texture.
-struct _glx_texture {
-  GLuint texture;
-  GLXPixmap glpixmap;
-  xcb_pixmap_t pixmap;
-  GLenum target;
-  unsigned width;
-  unsigned height;
-  unsigned depth;
-  bool y_inverted;
-};
-
-#ifdef CONFIG_OPENGL
-typedef struct {
-  /// Fragment shader for blur.
-  GLuint frag_shader;
-  /// GLSL program for blur.
-  GLuint prog;
-  /// Location of uniform "offset_x" in blur GLSL program.
-  GLint unifm_offset_x;
-  /// Location of uniform "offset_y" in blur GLSL program.
-  GLint unifm_offset_y;
-  /// Location of uniform "factor_center" in blur GLSL program.
-  GLint unifm_factor_center;
-} glx_blur_pass_t;
-
-typedef struct glx_prog_main {
-  /// GLSL program.
-  GLuint prog;
-  /// Location of uniform "opacity" in window GLSL program.
-  GLint unifm_opacity;
-  /// Location of uniform "invert_color" in blur GLSL program.
-  GLint unifm_invert_color;
-  /// Location of uniform "tex" in window GLSL program.
-  GLint unifm_tex;
-} glx_prog_main_t;
-
-#define GLX_PROG_MAIN_INIT { \
-  .prog = 0, \
-  .unifm_opacity = -1, \
-  .unifm_invert_color = -1, \
-  .unifm_tex = -1, \
-}
-
-#endif
 #endif
 
 /// Linked list type of atoms.
@@ -435,10 +376,6 @@ typedef struct options_t {
   bool glx_use_gpushader4;
   /// Custom fragment shader for painting windows, as a string.
   char *glx_fshader_win_str;
-  /// Custom GLX program used for painting window.
-#ifdef CONFIG_OPENGL
-  glx_prog_main_t glx_prog_win;
-#endif
   /// Whether to fork to background.
   bool fork_after_register;
   /// Whether to detect rounded corners.
@@ -611,10 +548,6 @@ typedef struct {
   f_SwapIntervalSGI glXSwapIntervalProc;
   /// Pointer to glXSwapIntervalMESA function.
   f_SwapIntervalMESA glXSwapIntervalMESAProc;
-  /// Pointer to glXBindTexImageEXT function.
-  f_BindTexImageEXT glXBindTexImageProc;
-  /// Pointer to glXReleaseTexImageEXT function.
-  f_ReleaseTexImageEXT glXReleaseTexImageProc;
   /// Pointer to the glFenceSync() function.
   f_FenceSync glFenceSyncProc;
   /// Pointer to the glIsSync() function.
@@ -1432,45 +1365,6 @@ vsync_init(session_t *ps);
 
 void
 vsync_deinit(session_t *ps);
-
-#ifdef CONFIG_OPENGL
-/** @name GLX
- */
-///@{
-
-#endif
-
-/**
- * Add a OpenGL debugging marker.
- */
-static inline void
-glx_mark_(session_t *ps, const char *func, XID xid, bool start) {
-#ifdef DEBUG_GLX_MARK
-  if (glx_has_context(ps) && ps->psglx->glStringMarkerGREMEDY) {
-    if (!func) func = "(unknown)";
-    const char *postfix = (start ? " (start)": " (end)");
-    auto str = ccalloc((strlen(func) + 12 + 2
-      + strlen(postfix) + 5), char);
-    strcpy(str, func);
-    sprintf(str + strlen(str), "(%#010lx)%s", xid, postfix);
-    ps->psglx->glStringMarkerGREMEDY(strlen(str), str);
-    free(str);
-  }
-#endif
-}
-
-#define glx_mark(ps, xid, start) glx_mark_(ps, __func__, xid, start)
-
-/**
- * Add a OpenGL debugging marker.
- */
-static inline void
-glx_mark_frame(session_t *ps) {
-#ifdef DEBUG_GLX_MARK
-  if (glx_has_context(ps) && ps->psglx->glFrameTerminatorGREMEDY)
-    ps->psglx->glFrameTerminatorGREMEDY();
-#endif
-}
 
 ///@}
 
