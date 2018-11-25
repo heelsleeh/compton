@@ -4,6 +4,7 @@
 
 #include "common.h"
 
+// Program and uniforms for window shader
 typedef struct {
   /// GLSL program.
   GLuint prog;
@@ -13,8 +14,9 @@ typedef struct {
   GLint unifm_invert_color;
   /// Location of uniform "tex" in window GLSL program.
   GLint unifm_tex;
-} gl_shader_t;
+} gl_win_shader_t;
 
+// Program and uniforms for blur shader
 typedef struct {
   /// Fragment shader for blur.
   GLuint frag_shader;
@@ -26,7 +28,7 @@ typedef struct {
   GLint unifm_offset_y;
   /// Location of uniform "factor_center" in blur GLSL program.
   GLint unifm_factor_center;
-} gl_blur_pass_t;
+} gl_blur_shader_t;
 
 /// @brief Wrapper of a binded GLX texture.
 typedef struct gl_texture {
@@ -37,6 +39,22 @@ typedef struct gl_texture {
   unsigned depth;
   bool y_inverted;
 } gl_texture_t;
+
+// OpenGL capabilities
+typedef struct gl_cap {
+  bool non_power_of_two_texture;
+} gl_cap_t;
+
+typedef struct {
+  /// Framebuffer used for blurring.
+  GLuint fbo;
+  /// Textures used for blurring.
+  GLuint textures[2];
+  /// Width of the textures.
+  int width;
+  /// Height of the textures.
+  int height;
+} gl_blur_cache_t;
 
 #define GL_PROG_MAIN_INIT { \
   .prog = 0, \
@@ -56,7 +74,7 @@ gl_create_program_from_str(const char *vert_shader_str,
 bool
 gl_load_prog_main(session_t *ps,
     const char *vshader_str, const char *fshader_str,
-    gl_shader_t *pprogram);
+    gl_win_shader_t *pprogram);
 
 unsigned char *
 gl_take_screenshot(session_t *ps, int *out_length);
