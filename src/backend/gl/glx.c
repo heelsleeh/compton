@@ -31,7 +31,7 @@ struct _glx_data {
   int glx_event;
   int glx_error;
   GLXContext ctx;
-  bool has_texture_non_power_of_two;
+  gl_cap_t cap;
 
   void (*glXBindTexImage)(Display *display, GLXDrawable drawable, int buffer,
     const int *attrib_list);
@@ -64,61 +64,28 @@ glx_has_extension(session_t *ps, const char *ext) {
  * @brief Release binding of a texture.
  */
 void
-glx_release_pixmap(struct _glx_data *gd, Display *dpy, glx_texture_t *ptex) {
+glx_release_pixmap(struct _glx_data *gd, Display *dpy, struct _glx_win_data *wd) {
   // Release binding
-  if (ptex->glpixmap && ptex->texture) {
-    glBindTexture(ptex->target, ptex->texture);
-    gd->glXReleaseTexImage(dpy, ptex->glpixmap, GLX_FRONT_LEFT_EXT);
-    glBindTexture(ptex->target, 0);
+  if (wd->glpixmap && wd->texture.texture) {
+    glBindTexture(wd->texture.target, wd->texture.texture);
+    gd->glXReleaseTexImage(dpy, wd->glpixmap, GLX_FRONT_LEFT_EXT);
+    glBindTexture(wd->texture.target, 0);
   }
 
   // Free GLX Pixmap
-  if (ptex->glpixmap) {
-    glXDestroyPixmap(dpy, ptex->glpixmap);
-    ptex->glpixmap = 0;
+  if (wd->glpixmap) {
+    glXDestroyPixmap(dpy, wd->glpixmap);
+    wd->glpixmap = 0;
   }
 
   gl_check_err();
 }
 
 /**
- * Free a GLX Framebuffer object.
- */
-static inline void
-free_glx_fbo(session_t *ps, GLuint *pfbo) {
-  if (*pfbo) {
-    glDeleteFramebuffers(1, pfbo);
-    *pfbo = 0;
-  }
-}
-
-#if 0
-/**
- * Free data in glx_blur_cache_t on resize.
- */
-static inline void
-free_glx_bc_resize(session_t *ps, glx_blur_cache_t *pbc) {
-  free_texture_r(ps, &pbc->textures[0]);
-  free_texture_r(ps, &pbc->textures[1]);
-  pbc->width = 0;
-  pbc->height = 0;
-}
-
-/**
- * Free a glx_blur_cache_t
- */
-static inline void
-free_glx_bc(session_t *ps, glx_blur_cache_t *pbc) {
-  free_glx_fbo(ps, &pbc->fbo);
-  free_glx_bc_resize(ps, pbc);
-}
-#endif
-
-/**
  * Free a glx_texture_t.
  */
-static inline void
-free_texture(struct _glx_data *gd, Display *dpy, glx_texture_t *ptex) {
+static void
+glx_release_win(struct _glx_data *gd, Display *dpy, gl_texture_t *ptex) {
   glx_release_pixmap(gd, dpy, ptex);
   glDeleteTextures(1, &ptex->texture);
 
@@ -485,19 +452,6 @@ end:
   return gd;
 }
 
-static void
-glx_free_prog_main(session_t *ps, glx_prog_main_t *pprogram) {
-  if (!pprogram)
-    return;
-  if (pprogram->prog) {
-    glDeleteProgram(pprogram->prog);
-    pprogram->prog = 0;
-  }
-  pprogram->unifm_opacity = -1;
-  pprogram->unifm_invert_color = -1;
-  pprogram->unifm_tex = -1;
-}
-
 /**
  * Destroy GLX related resources.
  */
@@ -559,21 +513,6 @@ glx_reinit(session_t *ps, bool need_render) {
   }
 
   return true;
-}
-
-/**
- * Callback to run on root window size change.
- */
-void
-glx_on_root_change(session_t *ps) {
-  glViewport(0, 0, ps->root_width, ps->root_height);
-
-  // Initialize matrix, copied from dcompmgr
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  glOrtho(0, ps->root_width, 0, ps->root_height, -1000.0, 1000.0);
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
 }
 
 /**
@@ -727,43 +666,10 @@ glx_init_blur(session_t *ps) {
 }
 
 /**
- * Load a GLSL main program from shader strings.
- */
-bool
-glx_load_prog_main(session_t *ps,
-    const char *vshader_str, const char *fshader_str,
-    glx_prog_main_t *pprogram) {
-  assert(pprogram);
-
-  // Build program
-  pprogram->prog = glx_create_program_from_str(vshader_str, fshader_str);
-  if (!pprogram->prog) {
-    printf_errf("(): Failed to create GLSL program.");
-    return false;
-  }
-
-  // Get uniform addresses
-#define P_GET_UNIFM_LOC(name, target) { \
-      pprogram->target = glGetUniformLocation(pprogram->prog, name); \
-      if (pprogram->target < 0) { \
-        printf_errf("(): Failed to get location of uniform '" name "'. Might be troublesome."); \
-      } \
-    }
-  P_GET_UNIFM_LOC("opacity", unifm_opacity);
-  P_GET_UNIFM_LOC("invert_color", unifm_invert_color);
-  P_GET_UNIFM_LOC("tex", unifm_tex);
-#undef P_GET_UNIFM_LOC
-
-  glx_check_err(ps);
-
-  return true;
-}
-
-/**
  * Bind a X pixmap to an OpenGL texture.
  */
 bool
-glx_bind_pixmap(session_t *ps, glx_texture_t **pptex, xcb_pixmap_t pixmap,
+glx_render_win(session_t *ps, glx_texture_t **pptex, xcb_pixmap_t pixmap,
     unsigned width, unsigned height, unsigned depth) {
   if (ps->o.backend != BKEND_GLX && ps->o.backend != BKEND_XR_GLX_HYBRID)
     return true;
@@ -909,6 +815,7 @@ glx_bind_pixmap(session_t *ps, glx_texture_t **pptex, xcb_pixmap_t pixmap,
   return true;
 }
 
+#if 0
 /**
  * Preprocess function before start painting.
  */
@@ -968,273 +875,7 @@ glx_paint_pre(session_t *ps, region_t *preg) {
 
   glx_check_err(ps);
 }
-
-/**
- * Set clipping region on the target window.
- */
-void
-glx_set_clip(session_t *ps, const region_t *reg) {
-  // Quit if we aren't using stencils
-  if (ps->o.glx_no_stencil)
-    return;
-
-  glDisable(GL_STENCIL_TEST);
-  glDisable(GL_SCISSOR_TEST);
-
-  if (!reg)
-    return;
-
-  int nrects;
-  const rect_t *rects = pixman_region32_rectangles((region_t *)reg, &nrects);
-
-  if (nrects == 1) {
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(rects[0].x1, ps->root_height-rects[0].y2,
-        rects[0].x2-rects[0].x1, rects[0].y2-rects[0].y1);
-  }
-
-  glx_check_err(ps);
-}
-
-static inline GLuint
-glx_gen_texture(session_t *ps, GLenum tex_tgt, int width, int height) {
-  GLuint tex = 0;
-  glGenTextures(1, &tex);
-  if (!tex) return 0;
-  glEnable(tex_tgt);
-  glBindTexture(tex_tgt, tex);
-  glTexParameteri(tex_tgt, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(tex_tgt, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameteri(tex_tgt, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(tex_tgt, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexImage2D(tex_tgt, 0, GL_RGB, width, height, 0, GL_RGB,
-      GL_UNSIGNED_BYTE, NULL);
-  glBindTexture(tex_tgt, 0);
-
-  return tex;
-}
-
-static inline void
-glx_copy_region_to_tex(session_t *ps, GLenum tex_tgt, int basex, int basey,
-    int dx, int dy, int width, int height) {
-  if (width > 0 && height > 0)
-    glCopyTexSubImage2D(tex_tgt, 0, dx - basex, dy - basey,
-        dx, ps->root_height - dy - height, width, height);
-}
-
-/**
- * Blur contents in a particular region.
- *
- * XXX seems to be way to complex for what it does
- */
-bool
-glx_blur_dst(session_t *ps, int dx, int dy, int width, int height, float z,
-    GLfloat factor_center,
-    const region_t *reg_tgt,
-    glx_blur_cache_t *pbc) {
-  assert(ps->psglx->blur_passes[0].prog);
-  const bool more_passes = ps->psglx->blur_passes[1].prog;
-  const bool have_scissors = glIsEnabled(GL_SCISSOR_TEST);
-  const bool have_stencil = glIsEnabled(GL_STENCIL_TEST);
-  bool ret = false;
-
-  // Calculate copy region size
-  glx_blur_cache_t ibc = { .width = 0, .height = 0 };
-  if (!pbc)
-    pbc = &ibc;
-
-  int mdx = dx, mdy = dy, mwidth = width, mheight = height;
-#ifdef DEBUG_GLX
-  printf_dbgf("(): %d, %d, %d, %d\n", mdx, mdy, mwidth, mheight);
 #endif
-
-  /*
-  if (ps->o.resize_damage > 0) {
-    int inc_x = 0, inc_y = 0;
-    for (int i = 0; i < MAX_BLUR_PASS; ++i) {
-      XFixed *kern = ps->o.blur_kerns[i];
-      if (!kern) break;
-      inc_x += XFIXED_TO_DOUBLE(kern[0]) / 2;
-      inc_y += XFIXED_TO_DOUBLE(kern[1]) / 2;
-    }
-    inc_x = min_i(ps->o.resize_damage, inc_x);
-    inc_y = min_i(ps->o.resize_damage, inc_y);
-
-    mdx = max_i(dx - inc_x, 0);
-    mdy = max_i(dy - inc_y, 0);
-    int mdx2 = min_i(dx + width + inc_x, ps->root_width),
-        mdy2 = min_i(dy + height + inc_y, ps->root_height);
-    mwidth = mdx2 - mdx;
-    mheight = mdy2 - mdy;
-  }
-  */
-
-  GLenum tex_tgt = GL_TEXTURE_RECTANGLE;
-  if (ps->psglx->has_texture_non_power_of_two)
-    tex_tgt = GL_TEXTURE_2D;
-
-  // Free textures if size inconsistency discovered
-  if (mwidth != pbc->width || mheight != pbc->height)
-    free_glx_bc_resize(ps, pbc);
-
-  // Generate FBO and textures if needed
-  if (!pbc->textures[0])
-    pbc->textures[0] = glx_gen_texture(ps, tex_tgt, mwidth, mheight);
-  GLuint tex_scr = pbc->textures[0];
-  if (more_passes && !pbc->textures[1])
-    pbc->textures[1] = glx_gen_texture(ps, tex_tgt, mwidth, mheight);
-  pbc->width = mwidth;
-  pbc->height = mheight;
-  GLuint tex_scr2 = pbc->textures[1];
-  if (more_passes && !pbc->fbo)
-    glGenFramebuffers(1, &pbc->fbo);
-  const GLuint fbo = pbc->fbo;
-
-  if (!tex_scr || (more_passes && !tex_scr2)) {
-    printf_errf("(): Failed to allocate texture.");
-    goto glx_blur_dst_end;
-  }
-  if (more_passes && !fbo) {
-    printf_errf("(): Failed to allocate framebuffer.");
-    goto glx_blur_dst_end;
-  }
-
-  // Read destination pixels into a texture
-  glEnable(tex_tgt);
-  glBindTexture(tex_tgt, tex_scr);
-  glx_copy_region_to_tex(ps, tex_tgt, mdx, mdy, mdx, mdy, mwidth, mheight);
-  /*
-  if (tex_scr2) {
-    glBindTexture(tex_tgt, tex_scr2);
-    glx_copy_region_to_tex(ps, tex_tgt, mdx, mdy, mdx, mdy, mwidth, dx - mdx);
-    glx_copy_region_to_tex(ps, tex_tgt, mdx, mdy, mdx, dy + height,
-        mwidth, mdy + mheight - dy - height);
-    glx_copy_region_to_tex(ps, tex_tgt, mdx, mdy, mdx, dy, dx - mdx, height);
-    glx_copy_region_to_tex(ps, tex_tgt, mdx, mdy, dx + width, dy,
-        mdx + mwidth - dx - width, height);
-  } */
-
-  // Texture scaling factor
-  GLfloat texfac_x = 1.0f, texfac_y = 1.0f;
-  if (GL_TEXTURE_2D == tex_tgt) {
-    texfac_x /= mwidth;
-    texfac_y /= mheight;
-  }
-
-  // Paint it back
-  if (more_passes) {
-    glDisable(GL_STENCIL_TEST);
-    glDisable(GL_SCISSOR_TEST);
-  }
-
-  bool last_pass = false;
-  for (int i = 0; !last_pass; ++i) {
-    last_pass = !ps->psglx->blur_passes[i + 1].prog;
-    assert(i < MAX_BLUR_PASS - 1);
-    const glx_blur_pass_t *ppass = &ps->psglx->blur_passes[i];
-    assert(ppass->prog);
-
-    assert(tex_scr);
-    glBindTexture(tex_tgt, tex_scr);
-
-    if (!last_pass) {
-      static const GLenum DRAWBUFS[2] = { GL_COLOR_ATTACHMENT0 };
-      glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-          GL_TEXTURE_2D, tex_scr2, 0);
-      glDrawBuffers(1, DRAWBUFS);
-      if (glCheckFramebufferStatus(GL_FRAMEBUFFER)
-          != GL_FRAMEBUFFER_COMPLETE) {
-        printf_errf("(): Framebuffer attachment failed.");
-        goto glx_blur_dst_end;
-      }
-    }
-    else {
-      static const GLenum DRAWBUFS[2] = { GL_BACK };
-      glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      glDrawBuffers(1, DRAWBUFS);
-      if (have_scissors)
-        glEnable(GL_SCISSOR_TEST);
-      if (have_stencil)
-        glEnable(GL_STENCIL_TEST);
-    }
-
-    // Color negation for testing...
-    // glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
-    // glTexEnvf(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_REPLACE);
-    // glTexEnvf(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_ONE_MINUS_SRC_COLOR);
-
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
-    glUseProgram(ppass->prog);
-    if (ppass->unifm_offset_x >= 0)
-      glUniform1f(ppass->unifm_offset_x, texfac_x);
-    if (ppass->unifm_offset_y >= 0)
-      glUniform1f(ppass->unifm_offset_y, texfac_y);
-    if (ppass->unifm_factor_center >= 0)
-      glUniform1f(ppass->unifm_factor_center, factor_center);
-
-    {
-      P_PAINTREG_START(crect) {
-        const GLfloat rx = (crect.x1 - mdx) * texfac_x;
-        const GLfloat ry = (mheight - (crect.y1 - mdy)) * texfac_y;
-        const GLfloat rxe = rx + (crect.x2 - crect.x1) * texfac_x;
-        const GLfloat rye = ry - (crect.y2 - crect.y1) * texfac_y;
-        GLfloat rdx = crect.x1 - mdx;
-        GLfloat rdy = mheight - crect.y1 + mdy;
-        if (last_pass) {
-          rdx = crect.x1;
-          rdy = ps->root_height - crect.y1;
-        }
-        GLfloat rdxe = rdx + (crect.x2 - crect.x1);
-        GLfloat rdye = rdy - (crect.y2 - crect.y1);
-
-#ifdef DEBUG_GLX
-        printf_dbgf("(): %f, %f, %f, %f -> %f, %f, %f, %f\n", rx, ry, rxe, rye, rdx, rdy, rdxe, rdye);
-#endif
-
-        glTexCoord2f(rx, ry);
-        glVertex3f(rdx, rdy, z);
-
-        glTexCoord2f(rxe, ry);
-        glVertex3f(rdxe, rdy, z);
-
-        glTexCoord2f(rxe, rye);
-        glVertex3f(rdxe, rdye, z);
-
-        glTexCoord2f(rx, rye);
-        glVertex3f(rdx, rdye, z);
-      } P_PAINTREG_END();
-    }
-
-    glUseProgram(0);
-
-    // Swap tex_scr and tex_scr2
-    {
-      GLuint tmp = tex_scr2;
-      tex_scr2 = tex_scr;
-      tex_scr = tmp;
-    }
-  }
-
-  ret = true;
-
-glx_blur_dst_end:
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  glBindTexture(tex_tgt, 0);
-  glDisable(tex_tgt);
-  if (have_scissors)
-    glEnable(GL_SCISSOR_TEST);
-  if (have_stencil)
-    glEnable(GL_STENCIL_TEST);
-
-  if (&ibc == pbc) {
-    free_glx_bc(ps, pbc);
-  }
-
-  glx_check_err(ps);
-
-  return ret;
-}
 
 backend_info_t glx_backend = {
   .init = glx_init,
