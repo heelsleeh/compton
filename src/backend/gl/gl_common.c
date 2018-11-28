@@ -571,8 +571,7 @@ gl_win_shader_from_string(session_t *ps,
 /**
  * Callback to run on root window size change.
  */
-void
-gl_resize(int width, int height) {
+void gl_resize(int width, int height) {
   glViewport(0, 0, width, height);
 
   glMatrixMode(GL_PROJECTION);
