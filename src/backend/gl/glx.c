@@ -32,6 +32,7 @@ struct _glx_data {
   int glx_error;
   GLXContext ctx;
   gl_cap_t cap;
+  gl_blur_shader_t blur_shader[MAX_BLUR_PASS];
 
   void (*glXBindTexImage)(Display *display, GLXDrawable drawable, int buffer,
     const int *attrib_list);
@@ -269,10 +270,6 @@ glx_update_fbconfig(session_t *ps) {
   return true;
 }
 
-static inline XVisualInfo *
-get_visualinfo_from_visual(session_t *ps, xcb_visualid_t visual) {
-}
-
 #ifdef DEBUG_GLX_DEBUG_CONTEXT
 static inline GLXFBConfig
 get_fbconfig_from_visualinfo(session_t *ps, const XVisualInfo *visualinfo) {
@@ -299,9 +296,43 @@ glx_debug_msg_callback(GLenum source, GLenum type,
 #endif
 
 /**
+ * Destroy GLX related resources.
+ */
+void glx_deinit(void *backend_data, session_t *ps) {
+  struct _glx_data *gd = backend_data;
+
+  // Free all GLX resources of windows
+  for (win *w = ps->list; w; w = w->next)
+    free_win_res_glx(ps, w);
+
+  // Free GLSL shaders/programs
+  for (int i = 0; i < MAX_BLUR_PASS; ++i) {
+    gl_free_blur_shader(&gd->blur_shader[i]);
+  }
+
+  glx_free_prog_main(ps, &ps->o.glx_prog_win);
+
+  gl_check_err();
+
+  // Free FBConfigs
+  for (int i = 0; i <= OPENGL_MAX_DEPTH; ++i) {
+    free(ps->psglx->fbconfigs[i]);
+    ps->psglx->fbconfigs[i] = NULL;
+  }
+
+  // Destroy GLX context
+  if (gd->ctx) {
+    glXDestroyContext(ps->dpy, gd->ctx);
+    gd->ctx = 0;
+  }
+
+  free(gd);
+}
+
+/**
  * Initialize OpenGL.
  */
-void * glx_init(session_t *ps) {
+void *glx_init(session_t *ps) {
   bool success = false;
   auto gd = ccalloc(1, struct _glx_data);
   XVisualInfo *pvis = NULL;
@@ -334,67 +365,64 @@ void * glx_init(session_t *ps) {
   }
 
   // Ensure GLX_EXT_texture_from_pixmap exists
-  if (!glx_hasglxext(ps, "GLX_EXT_texture_from_pixmap"))
-    goto glx_init_end;
+  if (!glx_has_extension(ps, "GLX_EXT_texture_from_pixmap"))
+    goto end;
 
   // Initialize GLX data structure
-  if (!ps->psglx) {
-    static const glx_session_t CGLX_SESSION_DEF = CGLX_SESSION_INIT;
-    ps->psglx = cmalloc(glx_session_t);
-    memcpy(ps->psglx, &CGLX_SESSION_DEF, sizeof(glx_session_t));
-
-    for (int i = 0; i < MAX_BLUR_PASS; ++i) {
-      glx_blur_pass_t *ppass = &ps->psglx->blur_passes[i];
-      ppass->unifm_factor_center = -1;
-      ppass->unifm_offset_x = -1;
-      ppass->unifm_offset_y = -1;
-    }
+  for (int i = 0; i < MAX_BLUR_PASS; ++i) {
+    gd->blur_shader[i] = (gl_blur_shader_t) {
+      .frag_shader = -1,
+      .prog = -1,
+      .unifm_offset_x = -1,
+      .unifm_offset_y = -1,
+      .unifm_factor_center = -1
+    };
   }
 
-// Get GLX context
-gd->context = glXCreateContext(ps->dpy, pvis, None, GL_TRUE);
+  // Get GLX context
+  gd->ctx = glXCreateContext(ps->dpy, pvis, None, GL_TRUE);
 
-if (!gd->context) {
-  printf_errf("(): Failed to get GLX context.");
-  goto end;
-}
+  if (!gd->ctx) {
+    printf_errf("(): Failed to get GLX context.");
+    goto end;
+  }
 
-// Attach GLX context
-if (!glXMakeCurrent(ps->dpy, get_tgt_window(ps), psglx->context)) {
-  printf_errf("(): Failed to attach GLX context.");
-  goto glx_init_end;
-}
+  // Attach GLX context
+  GLXDrawable tgt = ps->overlay;
+  if (!tgt) {
+    tgt = ps->root;
+  }
+  if (!glXMakeCurrent(ps->dpy, tgt, gd->ctx)) {
+    printf_errf("(): Failed to attach GLX context.");
+    goto end;
+  }
 
 #ifdef DEBUG_GLX_DEBUG_CONTEXT
-    {
-      f_DebugMessageCallback p_DebugMessageCallback =
-        (f_DebugMessageCallback)
-        glXGetProcAddress((const GLubyte *) "glDebugMessageCallback");
-      if (!p_DebugMessageCallback) {
-        printf_errf("(): Failed to get glDebugMessageCallback(0.");
-        goto glx_init_end;
-      }
-      p_DebugMessageCallback(glx_debug_msg_callback, ps);
-    }
-#endif
-
+  f_DebugMessageCallback p_DebugMessageCallback =
+    (f_DebugMessageCallback)
+    glXGetProcAddress((const GLubyte *) "glDebugMessageCallback");
+  if (!p_DebugMessageCallback) {
+    printf_errf("(): Failed to get glDebugMessageCallback(0.");
+    goto glx_init_end;
   }
+  p_DebugMessageCallback(glx_debug_msg_callback, ps);
+#endif
 
   // Ensure we have a stencil buffer. X Fixes does not guarantee rectangles
   // in regions don't overlap, so we must use stencil buffer to make sure
   // we don't paint a region for more than one time, I think?
-  if (need_render && !ps->o.glx_no_stencil) {
+  if (!ps->o.glx_no_stencil) {
     GLint val = 0;
     glGetIntegerv(GL_STENCIL_BITS, &val);
     if (!val) {
       printf_errf("(): Target window doesn't have stencil buffer.");
-      goto glx_init_end;
+      goto end;
     }
   }
 
   // Check GL_ARB_texture_non_power_of_two, requires a GLX context and
   // must precede FBConfig fetching
-  gd->has_texture_non_power_of_two = gl_has_extension(ps,
+  gd->cap.non_power_of_two_texture = gl_has_extension(ps,
     "GL_ARB_texture_non_power_of_two");
 
   // Acquire function addresses
@@ -405,13 +433,15 @@ if (!glXMakeCurrent(ps->dpy, get_tgt_window(ps), psglx->context)) {
     glXGetProcAddress((const GLubyte *) "glFrameTerminatorGREMEDY");
 #endif
 
-  psglx->glXBindTexImageProc = (f_BindTexImageEXT)
+  gd->glXBindTexImage = (void *)
     glXGetProcAddress((const GLubyte *) "glXBindTexImageEXT");
-  psglx->glXReleaseTexImageProc = (f_ReleaseTexImageEXT)
+  gd->glXReleaseTexImage = (void *)
     glXGetProcAddress((const GLubyte *) "glXReleaseTexImageEXT");
-  if (!psglx->glXBindTexImageProc || !psglx->glXReleaseTexImageProc) {
-    printf_errf("(): Failed to acquire glXBindTexImageEXT() / glXReleaseTexImageEXT().");
-    goto glx_init_end;
+  if (!gd->glXBindTexImage || !gd->glXReleaseTexImage) {
+    printf_errf("(): Failed to acquire glXBindTexImageEXT() and/or "
+      "glXReleaseTexImageEXT(), make sure your OpenGL supports"
+      "GLX_EXT_texture_from_pixmap");
+    goto end;
   }
 
   // Acquire FBConfigs
@@ -419,7 +449,7 @@ if (!glXMakeCurrent(ps->dpy, get_tgt_window(ps), psglx->context)) {
     goto end;
 
   // Render preparations
-  glx_on_root_change(ps);
+  gl_resize(ps->root_width, ps->root_height);
 
   glDisable(GL_DEPTH_TEST);
   glDepthMask(GL_FALSE);
@@ -445,74 +475,11 @@ end:
   cxfree(pvis);
 
   if (!success) {
-    glx_destroy(gd);
+    glx_deinit(gd, ps);
     return NULL;
   }
 
   return gd;
-}
-
-/**
- * Destroy GLX related resources.
- */
-void
-glx_destroy(session_t *ps) {
-  if (!ps->psglx)
-    return;
-
-  // Free all GLX resources of windows
-  for (win *w = ps->list; w; w = w->next)
-    free_win_res_glx(ps, w);
-
-  // Free GLSL shaders/programs
-  for (int i = 0; i < MAX_BLUR_PASS; ++i) {
-    glx_blur_pass_t *ppass = &ps->psglx->blur_passes[i];
-    if (ppass->frag_shader)
-      glDeleteShader(ppass->frag_shader);
-    if (ppass->prog)
-      glDeleteProgram(ppass->prog);
-  }
-
-  glx_free_prog_main(ps, &ps->o.glx_prog_win);
-
-  glx_check_err(ps);
-
-  // Free FBConfigs
-  for (int i = 0; i <= OPENGL_MAX_DEPTH; ++i) {
-    free(ps->psglx->fbconfigs[i]);
-    ps->psglx->fbconfigs[i] = NULL;
-  }
-
-  // Destroy GLX context
-  if (ps->psglx->context) {
-    glXDestroyContext(ps->dpy, ps->psglx->context);
-    ps->psglx->context = NULL;
-  }
-
-  free(ps->psglx);
-  ps->psglx = NULL;
-}
-
-/**
- * Reinitialize GLX.
- */
-bool
-glx_reinit(session_t *ps, bool need_render) {
-  // Reinitialize VSync as well
-  vsync_deinit(ps);
-
-  glx_destroy(ps);
-  if (!glx_init(ps, need_render)) {
-    printf_errf("(): Failed to initialize GLX.");
-    return false;
-  }
-
-  if (!vsync_init(ps)) {
-    printf_errf("(): Failed to initialize VSync.");
-    return false;
-  }
-
-  return true;
 }
 
 /**

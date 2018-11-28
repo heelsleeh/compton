@@ -9,6 +9,11 @@ typedef struct backend_info {
 
   // ===========    Initialization    ===========
 
+  /// Initialize the backend, prepare for rendering to the target window.
+  /// Here is how you should choose target window:
+  ///    1) if ps->overlay is not XCB_NONE, use that
+  ///    2) use ps->root otherwise
+  /// XXX make the target window a parameter
   void *(*init)(session_t *ps)
     __attribute__((nonnull(1)));
   void (*deinit)(void *backend_data, session_t *ps)

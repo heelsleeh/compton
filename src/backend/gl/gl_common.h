@@ -78,6 +78,7 @@ gl_load_prog_main(session_t *ps,
 
 unsigned char *
 gl_take_screenshot(session_t *ps, int *out_length);
+void gl_resize(int width, int height);
 
 /**
  * Get a textual representation of an OpenGL error.
@@ -139,6 +140,17 @@ gl_has_extension(session_t *ps, const char *ext) {
   }
   printf_errf("(): Missing GL extension %s.", ext);
   return false;
+}
+
+static inline void
+gl_free_blur_shader(gl_blur_shader_t *shader) {
+  if (shader->prog)
+    glDeleteShader(shader->prog);
+  if (shader->frag_shader)
+    glDeleteShader(shader->frag_shader);
+
+  shader->prog = 0;
+  shader->frag_shader = 0;
 }
 
 #define P_PAINTREG_START(var) do { \
