@@ -1,17 +1,21 @@
-defaults: &defaults
-  docker:
-    - image: yshui/comptonci
-cached-checkout: &ccheckout
-just-build: &build
+executors:
+  e:
+    docker:
+      - image: yshui/comptonci
+    working_directory: "/tmp/workspace"
+    environment:
+      UBSAN_OPTIONS: "halt_on_error=1"
 
 version: 2.1
-jobs:
+commands:
   build:
-    <<: *defaults
     parameters:
       build-config:
         type: string
-        default: -Dbuild_docs=true
+        default: ""
+      cc:
+        type: string
+        default: cc
     steps:
       - restore_cache:
           keys:
@@ -25,25 +29,107 @@ jobs:
             - ".git"
       - run:
           name: config
-          command: meson << parameters.build-config >> . build
+          command: CC=<< parameters.cc >> meson << parameters.build-config >> -Dunittest=true --werror . build
       - run:
           name: build
-          command: ninja -C build
-  test-xvfb:
-    <<: *defaults
+          command: ninja -vC build
+
+jobs:
+  basic:
+    executor: e
     steps:
+      - build:
+          build-config: -Dbuild_docs=true -Db_coverage=true
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .
+  test:
+    executor: e
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
       - run:
-          name: xxx
-          command: xvfb-run -s "-screen 0 640x480x24" glxinfo
+          name: unit test
+          command: ninja -vC build test
+      - run:
+          name: test config file parsing
+          command: xvfb-run -s "-screen 0 640x480x24" build/src/picom --config picom.sample.conf --no-vsync --diagnostics
+      - run:
+          name: run testsuite
+          command: tests/run_tests.sh build/src/picom
+      - run:
+          name: generate coverage reports
+          command: cd build; find -name '*.gcno' -exec gcov -pb {} +
+      - run:
+          name: download codecov scripts
+          command: curl -s https://codecov.io/bash > codecov.sh
+      - run:
+          name: upload coverage reports
+          command: bash ./codecov.sh -X gcov
+
+  minimal:
+    executor: e
+    steps:
+      - build:
+          build-config: -Dopengl=false -Ddbus=false -Dregex=false -Dconfig_file=false
+  release:
+    executor: e
+    steps:
+      - build:
+          build-config: --buildtype=release
+  release-clang:
+    executor: e
+    steps:
+      - build:
+          cc: clang
+          build-config: --buildtype=release
+  nogl:
+    executor: e
+    steps:
+      - build:
+          build-config: -Dopengl=false
+  noregex:
+    executor: e
+    steps:
+      - build:
+          build-config: -Dregex=false
+  clang_basic:
+    executor: e
+    steps:
+      - build:
+          cc: clang
+  clang_minimal:
+    executor: e
+    steps:
+      - build:
+          cc: clang
+          build-config: -Dopengl=false -Ddbus=false -Dregex=false -Dconfig_file=false
+  clang_nogl:
+    executor: e
+    steps:
+      - build:
+          cc: clang
+          build-config: -Dopengl=false
+  clang_noregex:
+    executor: e
+    steps:
+      - build:
+          cc: clang
+          build-config: -Dregex=false
 
 workflows:
   all_builds:
     jobs:
-      - build
-      - build:
-          build-config: -Dopengl=false -Ddbus=false -Dregex=false -Dconfig_file=false
-      - build:
-          build-config: -Dopengl=false
-      - build:
-          build-config: -Dregex=false
-#     - test-xvfb
+      - basic
+      - clang_basic
+      - minimal
+      - clang_minimal
+      - nogl
+      - clang_nogl
+      - release
+      - release-clang
+      - test:
+          requires:
+            - basic
+# vim: set sw=2 ts=8 et:

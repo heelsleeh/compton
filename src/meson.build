@@ -1,29 +1,41 @@
-deps = [
+libev = dependency('libev', required: false)
+if not libev.found()
+	libev = cc.find_library('ev')
+endif
+base_deps = [
 	cc.find_library('m'),
-	cc.find_library('ev'),
-	dependency('xcb', version: '>=1.9.2'),
+	libev
 ]
 
-srcs = [ files('compton.c', 'win.c', 'c2.c', 'x.c', 'config.c', 'vsync.c',
-               'diagnostic.c', 'string_utils.c', 'render.c', 'kernel.c')]
+srcs = [ files('picom.c', 'win.c', 'c2.c', 'x.c', 'config.c', 'vsync.c', 'utils.c',
+               'diagnostic.c', 'string_utils.c', 'render.c', 'kernel.c', 'log.c',
+               'options.c', 'event.c', 'cache.c', 'atom.c', 'file_watch.c') ]
+picom_inc = include_directories('.')
 
 cflags = []
 
-required_package = [
-	'x11', 'x11-xcb', 'xcb-renderutil',
-	'xcb-render', 'xcb-damage', 'xcb-randr',
-	'xcb-composite', 'xcb-shape', 'xcb-image',
-	'xcb-xfixes', 'xcb-present', 'xext', 'pixman-1'
+required_xcb_packages = [
+	'xcb-render', 'xcb-damage', 'xcb-randr', 'xcb-sync', 'xcb-composite',
+	'xcb-shape', 'xcb-xinerama', 'xcb-xfixes', 'xcb-present', 'xcb'
 ]
 
-foreach i : required_package
-	deps += [dependency(i, required: true)]
+required_packages = [
+	'x11', 'x11-xcb', 'xcb-renderutil', 'xcb-image', 'xext', 'pixman-1'
+]
+
+foreach i : required_packages
+	base_deps += [dependency(i, required: true)]
 endforeach
 
-if get_option('xinerama')
-	deps += [dependency('xcb-xinerama', required: true)]
-	cflags += ['-DCONFIG_XINERAMA']
+foreach i : required_xcb_packages
+	base_deps += [dependency(i, version: '>=1.12.0', required: true)]
+endforeach
+
+if not cc.has_header('uthash.h')
+  error('Dependency uthash not found')
 endif
+
+deps = []
 
 if get_option('config_file')
 	deps += [dependency('libconfig', version: '>=1.4', required: true),
@@ -46,7 +58,7 @@ if get_option('vsync_drm')
 endif
 
 if get_option('opengl')
-	cflags += ['-DCONFIG_OPENGL']
+	cflags += ['-DCONFIG_OPENGL', '-DGL_GLEXT_PROTOTYPES']
 	deps += [dependency('gl', required: true)]
 	srcs += [ 'opengl.c' ]
 endif
@@ -62,4 +74,16 @@ if get_option('xrescheck')
 	srcs += [ 'xrescheck.c' ]
 endif
 
-executable('compton', srcs, c_args: cflags, dependencies: deps, install: true)
+if get_option('unittest')
+	cflags += ['-DUNIT_TEST']
+endif
+
+subdir('backend')
+
+picom = executable('picom', srcs, c_args: cflags,
+  dependencies: [ base_deps, deps, test_h_dep ],
+  install: true, include_directories: picom_inc)
+
+if get_option('unittest')
+	test('picom unittest', picom, args: [ '--unittest' ])
+endif
